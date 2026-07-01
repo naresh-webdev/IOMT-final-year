@@ -1,0 +1,97 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include "DHT.h"
+
+// --- Configuration ---
+const char* ssid = "Naresh";
+const char* password = "77777778";
+// Replace with your laptop's IPv4 address from Step 1
+const char* serverUrl = "http://10.161.247.187:5002/telemetry"; 
+
+// Pin Definitions
+#define DHTPIN 13
+#define DHTTYPE DHT22   
+#define MQ135_PIN 34
+#define BUTTON_PIN 12
+
+DHT dht(DHTPIN, DHTTYPE);
+
+unsigned long lastDebounceTime = 0;
+const unsigned long debounceDelay = 200; 
+
+void setup() {
+  Serial.begin(115200);
+  dht.begin();
+  pinMode(BUTTON_PIN, INPUT);
+
+  // Connect to Wi-Fi
+  Serial.print("Connecting to Wi-Fi: ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWi-Fi Connected successfully!");
+  Serial.print("ESP32 IP Address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void loop() {
+  // 1. Read Sensor Data
+  float humidity = dht.readHumidity();
+  float temperature = dht.readTemperature();
+  int raw_air_quality = analogRead(MQ135_PIN);
+
+  if (isnan(humidity) || isnan(temperature)) {
+    Serial.println("Error: Failed to read from DHT22!");
+    return;
+  }
+
+  // 2. Check Switch State
+  bool inhaler_triggered = false;
+  if (digitalRead(BUTTON_PIN) == HIGH) {
+    if ((millis() - lastDebounceTime) > debounceDelay) {
+      inhaler_triggered = true;
+      lastDebounceTime = millis();
+    }
+  }
+
+  // 3. Send Data via HTTP POST if Wi-Fi is healthy
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(serverUrl);
+    http.addHeader("Content-Type", "application/json");
+
+    // Manually format the JSON data payload string
+    String jsonPayload = "{\"temperature\":" + String(temperature) + 
+                         ",\"humidity\":" + String(humidity) + 
+                         ",\"air_quality\":" + String(raw_air_quality) + 
+                         ",\"inhaler_pressed\":" + (inhaler_triggered ? "true" : "false") + "}";
+
+    Serial.print("Sending Telemetry: ");
+    Serial.println(jsonPayload);
+
+    int httpResponseCode = http.POST(jsonPayload);
+
+    if (httpResponseCode > 0) {
+      Serial.print("Server Response Code: ");
+      Serial.println(httpResponseCode);
+    } else {
+      Serial.print("Error sending POST request: ");
+      Serial.println(httpResponseCode);
+    }
+    
+    http.end();
+  } else {
+    Serial.println("Wi-Fi disconnected! Retrying connection...");
+  }
+
+  // If the button was pressed, loop instantly to avoid latency, else wait 1 second
+  if (inhaler_triggered) {
+    delay(10);
+  } else {
+    delay(1000);
+  }
+}
