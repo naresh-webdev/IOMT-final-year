@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IoMT Asthma Care Gateway</title>
+    <script src="{{ url_for('static', filename='socket.io.js') }}"></script>
+    <script src="{{ url_for('static', filename='chart.js') }}"></script>
+    
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --card-bg: #1e293b;
+            --accent-blue: #38bdf8;
+            --accent-green: #4ade80;
+            --accent-red: #f87171;
+            --accent-purple: #c084fc;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+        }
+
+        body {
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            margin: 0;
+            padding: 24px;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #334155;
+            padding-bottom: 16px;
+            margin-bottom: 24px;
+        }
+
+        .header h1 {
+            margin: 0;
+            font-size: 24px;
+            font-weight: 600;
+            letter-spacing: -0.5px;
+        }
+
+        .status-badge {
+            background-color: #1e293b;
+            border: 1px solid #4ade80;
+            color: var(--accent-green);
+            padding: 6px 12px;
+            border-radius: 9999px;
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        /* 4-Column Grid for Telemetry + Analytics Cards */
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 20px;
+            margin-bottom: 24px;
+        }
+
+        .card {
+            background-color: var(--card-bg);
+            border: 1px solid #334155;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+        }
+
+        .card-title {
+            color: var(--text-muted);
+            font-size: 13px;
+            font-weight: 500;
+            text-transform: uppercase;
+            margin-bottom: 8px;
+        }
+
+        .card-value {
+            font-size: 32px;
+            font-weight: 700;
+        }
+
+        .dashboard-content {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 20px;
+        }
+
+        .chart-container {
+            background-color: var(--card-bg);
+            border: 1px solid #334155;
+            border-radius: 12px;
+            padding: 20px;
+            height: 350px;
+        }
+
+        .log-container {
+            background-color: var(--card-bg);
+            border: 1px solid #334155;
+            border-radius: 12px;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            height: 350px;
+        }
+
+        .log-list {
+            margin-top: 12px;
+            overflow-y: auto;
+            flex-grow: 1;
+            padding-right: 4px;
+        }
+
+        .log-item {
+            background-color: #0f172a;
+            border-left: 4px solid var(--accent-blue);
+            padding: 10px;
+            border-radius: 4px;
+            margin-bottom: 8px;
+            font-size: 13px;
+        }
+
+        .log-item.inhaler-event {
+            border-left-color: var(--accent-red);
+            background-color: #2d1a1a;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1>IoMT Asthma Telemetry Base-Station</h1>
+        <div class="status-badge" id="system-status">Network Status: Online</div>
+    </div>
+
+    <div class="metrics-grid">
+        <div class="card">
+            <div class="card-title">Air Quality (MQ-135)</div>
+            <div class="card-value" id="val-aqi" style="color: var(--accent-blue);">--</div>
+        </div>
+        <div class="card">
+            <div class="card-title">Humidity (DHT22)</div>
+            <div class="card-value" id="val-humidity" style="color: var(--accent-green);">--</div>
+        </div>
+        <div class="card">
+            <div class="card-title">Live Environmental Risk</div>
+            <div class="card-value" id="val-risk" style="color: var(--accent-purple);">0%</div>
+        </div>
+        <div class="card">
+            <div class="card-title">Humidity Trigger Affinity</div>
+            <div class="card-value" id="val-correlation" style="color: var(--accent-red);">0%</div>
+        </div>
+    </div>
+
+    <div class="dashboard-content">
+        <div class="chart-container">
+            <canvas id="telemetryChart"></canvas>
+        </div>
+        
+        <div class="log-container">
+            <div class="card-title" style="margin: 0;">Clinical Event Audit Log</div>
+            <div class="log-list" id="log-feed">
+                <div class="log-item">System initialized. Awaiting wireless data stream...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+
+        // Historical tracking variables for correlation math
+        let totalInhalerUses = 0;
+        let highHumidityUses = 0;
+        const HUMIDITY_HIGH_THRESHOLD = 60.0; // The clinical risk line
+
+        // Initialize Chart
+        const ctx = document.getElementById('telemetryChart').getContext('2d');
+        const maxDataPoints = 20;
+        
+        const telemetryChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [
+                    { label: 'Air Quality Index', data: [], borderColor: '#38bdf8', backgroundColor: 'rgba(56, 189, 248, 0.1)', yAxisID: 'y-aqi', tension: 0.3 },
+                    { label: 'Humidity %', data: [], borderColor: '#4ade80', backgroundColor: 'transparent', yAxisID: 'y-env', tension: 0.3 }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    x: { grid: { color: '#334155' }, ticks: { color: '#94a3b8' } },
+                    'y-aqi': { type: 'linear', position: 'left', grid: { color: '#334155' }, ticks: { color: '#38bdf8' } },
+                    'y-env': { type: 'linear', position: 'right', grid: { display: false }, ticks: { color: '#4ade80' } }
+                },
+                plugins: { legend: { labels: { color: '#f8fafc' } } }
+            }
+        });
+
+        socket.on('update_dashboard', function(data) {
+            const now = new Date().toLocaleTimeString();
+
+            // Update raw UI strings
+            document.getElementById('val-aqi').innerText = data.air_quality;
+            document.getElementById('val-humidity').innerText = data.humidity + "%";
+
+            // --- 1. Compute Live Environmental Risk Index ---
+            // Normalize humidity: anything above 45% starts generating minor risk, above 65% is high risk
+            let humidityRisk = (data.humidity - 45) / (65 - 45);
+            if (humidityRisk < 0) humidityRisk = 0;
+            if (humidityRisk > 1) humidityRisk = 1;
+
+            // Normalize AQI: assuming baseline fresh air is around 400, poor air is 1200+
+            let aqiRisk = (data.air_quality - 400) / (1200 - 400);
+            if (aqiRisk < 0) aqiRisk = 0;
+            if (aqiRisk > 1) aqiRisk = 1;
+
+            // Combine risks (weighted: 60% humidity weight for asthma, 40% general air quality)
+            let totalRiskPercent = Math.round(((humidityRisk * 0.6) + (aqiRisk * 0.4)) * 100);
+            document.getElementById('val-risk').innerText = totalRiskPercent + "%";
+
+            // Update Chart
+            if (telemetryChart.data.labels.length >= maxDataPoints) {
+                telemetryChart.data.labels.shift();
+                telemetryChart.data.datasets[0].data.shift();
+                telemetryChart.data.datasets[1].data.shift();
+            }
+            telemetryChart.data.labels.push(now);
+            telemetryChart.data.datasets[0].data.push(data.air_quality);
+            telemetryChart.data.datasets[1].data.push(data.humidity);
+            telemetryChart.update();
+
+            // --- 2. Process Inhaler Engagement Events & Correlation ---
+            if (data.inhaler_pressed === true) {
+                totalInhalerUses++;
+
+                // Check if the current context matches a high humidity trigger condition
+                if (data.humidity >= HUMIDITY_HIGH_THRESHOLD) {
+                    highHumidityUses++;
+                }
+
+                // Recalculate historical affinity percentage
+                let affinityScore = Math.round((highHumidityUses / totalInhalerUses) * 100);
+                document.getElementById('val-correlation').innerText = affinityScore + "%";
+
+                // Update Log Feed
+                const logFeed = document.getElementById('log-feed');
+                const newLog = document.createElement('div');
+                newLog.className = 'log-item inhaler-event';
+                newLog.innerHTML = `<strong>[${now}] DOSAGE REGISTERED</strong><br>
+                                    Context Correlation: Humidity was ${data.humidity}% (Threshold: ${HUMIDITY_HIGH_THRESHOLD}%). Current environmental risk was ${totalRiskPercent}%.`;
+                logFeed.insertBefore(newLog, logFeed.firstChild);
+            }
+        });
+    </script>
+</body>
+</html>
